@@ -55,14 +55,14 @@ impl TextOffset {
         TextOffset(self.0 - width)
     }
     pub fn take_from<'a>(&self, content: &'a str) -> &'a str {
-        &content[(self.0.0 as usize)..]
+        &content[(self.0 .0 as usize)..]
     }
 }
 impl Sub for TextOffset {
     type Output = TextWidth;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        TextWidth(self.0.0 - rhs.0.0)
+        TextWidth(self.0 .0 - rhs.0 .0)
     }
 }
 
@@ -79,7 +79,7 @@ impl TextSpan {
         self.start <= other.start && self.end >= other.end
     }
     pub fn take<'b>(&self, content: &'b str) -> &'b str {
-        &content[(self.start.0.0 as usize)..(self.end.0.0 as usize)]
+        &content[(self.start.0 .0 as usize)..(self.end.0 .0 as usize)]
     }
     pub fn n_chars(&self, content: &str) -> usize {
         self.take(content).chars().count()
@@ -87,6 +87,13 @@ impl TextSpan {
     /// Get the span of width 0, located right after this span.
     pub fn after(&self) -> Self {
         Self { start: self.end, end: self.end }
+    }
+
+    pub fn before_end(&self) -> Self {
+        Self {
+            start: TextOffset(TextWidth(self.end.0 .0 - 1)),
+            end: TextOffset(TextWidth(self.end.0 .0 - 1)),
+        }
     }
     /// Get the span of width 0, located right at the beginning of this span.
     pub fn start_only(&self) -> Self {

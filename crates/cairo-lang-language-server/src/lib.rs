@@ -855,11 +855,22 @@ impl LanguageServer for Backend {
             let (node, _lookup_items) = get_node_and_lookup_items(db, file_id, params.range.start)?;
             for diagnostic in params.context.diagnostics.iter() {
                 let action = match diagnostic.message.as_str() {
-                    "Unused variable. Consider ignoring by prefixing with `_`." => unused_variable(
+                    "Unused variable. Consider ignoring by prefixing with `_`." => {
+                        code_actions::unused_variable(
+                            db,
+                            &node,
+                            diagnostic.clone(),
+                            params.text_document.uri.clone(),
+                        )
+                    }
+                    text if text.starts_with("Missing member ") => code_actions::struct_members(
+                        text,
                         db,
                         &node,
                         diagnostic.clone(),
                         params.text_document.uri.clone(),
+                        &_lookup_items,
+                        file_id,
                     ),
                     _ => CodeAction::default(),
                 };
@@ -871,34 +882,90 @@ impl LanguageServer for Backend {
     }
 }
 
-/// Create a code action that prefixes an unused variable with an `_`.
-fn unused_variable(
-    db: &dyn SemanticGroup,
-    node: &SyntaxNode,
-    diagnostic: Diagnostic,
-    uri: Url,
-) -> CodeAction {
-    CodeAction {
-        title: format!(
-            "if this is intentional, prefix it with an underscore: `_{}`",
-            node.get_text(db.upcast())
-        ),
-        edit: Some(WorkspaceEdit {
-            changes: Some(HashMap::from_iter([(
-                uri,
-                // The diagnostic range is just the first char of the variable name so we can just
-                // pass an underscore as the new text it won't replace the current variable name
-                // and it will prefix it with `_`
-                vec![TextEdit { range: diagnostic.range, new_text: "_".to_owned() }],
-            )])),
-            document_changes: None,
-            change_annotations: None,
-        }),
-        diagnostics: Some(vec![diagnostic]),
-        ..Default::default()
+mod code_actions {
+    use std::collections::HashMap;
+
+    use cairo_lang_defs::ids::{FunctionWithBodyId, ImplItemId, LookupItemId, ModuleItemId};
+    use cairo_lang_filesystem::ids::FileId;
+    use cairo_lang_semantic::db::SemanticGroup;
+    use cairo_lang_syntax::node::{SyntaxNode, TypedSyntaxNode};
+    use tower_lsp::lsp_types::{CodeAction, Diagnostic, TextEdit, Url, WorkspaceEdit};
+
+    use crate::{from_pos, nearest_semantic_expr};
+
+    /// Create a code action that prefixes an unused variable with an `_`.
+    pub(super) fn unused_variable(
+        db: &dyn SemanticGroup,
+        node: &SyntaxNode,
+        diagnostic: Diagnostic,
+        uri: Url,
+    ) -> CodeAction {
+        CodeAction {
+            title: format!(
+                "if this is intentional, prefix it with an underscore: `_{}`",
+                node.get_text(db.upcast())
+            ),
+            edit: Some(WorkspaceEdit {
+                changes: Some(HashMap::from_iter([(
+                    uri,
+                    // The diagnostic range is just the first char of the variable name so we can just
+                    // pass an underscore as the new text it won't replace the current variable name
+                    // and it will prefix it with `_`
+                    vec![TextEdit { range: diagnostic.range, new_text: "_".to_owned() }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            diagnostics: Some(vec![diagnostic]),
+            ..Default::default()
+        }
+    }
+    pub(super) fn struct_members(
+        text: &str,
+        db: &dyn SemanticGroup,
+        node: &SyntaxNode,
+        diagnostic: Diagnostic,
+        uri: Url,
+        lookup_items: &[LookupItemId],
+        file_id: FileId,
+    ) -> CodeAction {
+        // The diagnostic is formatted to end with `".`
+        let member = text.trim_start_matches("Missing member \"").strip_suffix("\".").unwrap();
+        let lookup_item_id = lookup_items.iter().next().unwrap();
+        let function_id = match *lookup_item_id {
+            LookupItemId::ModuleItem(ModuleItemId::FreeFunction(free_function_id)) => {
+                FunctionWithBodyId::Free(free_function_id)
+            }
+            LookupItemId::ImplItem(ImplItemId::Function(impl_function_id)) => {
+                FunctionWithBodyId::Impl(impl_function_id)
+            }
+            _ => todo!(),
+        };
+        let struct_ctor = nearest_semantic_expr(db, node.clone(), function_id).unwrap();
+        let ctor = struct_ctor.stable_ptr().lookup(db.upcast()).as_syntax_node();
+        let mut range = diagnostic.range;
+        range.start =
+            from_pos(ctor.span(db.upcast()).start.position_in_file(db.upcast(), file_id).unwrap());
+        range.end =
+            from_pos(ctor.span(db.upcast()).end.position_in_file(db.upcast(), file_id).unwrap());
+        let mut node_text = ctor.get_text(db.upcast());
+        node_text.insert_str(node_text.find('{').unwrap() + 1, &format!("{member}, "));
+
+        CodeAction {
+            title: "Fill struct members".to_owned(),
+            edit: Some(WorkspaceEdit {
+                changes: Some(HashMap::from_iter([(
+                    uri,
+                    vec![TextEdit { range, new_text: node_text }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            diagnostics: Some(vec![diagnostic]),
+            ..Default::default()
+        }
     }
 }
-
 fn find_definition(
     db: &RootDatabase,
     file: FileId,
